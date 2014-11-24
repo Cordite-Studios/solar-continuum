@@ -1,5 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+module Example.Logs where
+
 import Solar.Continuum.Log
 import Solar.Continuum.Types
 
