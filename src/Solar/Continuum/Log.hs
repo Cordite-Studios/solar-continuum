@@ -37,6 +37,7 @@ tellLogWritePosition n = liftF $ TellLogWritePosition n id
 
 -- | Gets the checksum of the (already written) log.
 -- Will never take into account writes that happen within the current execution.
+-- However all deletes must later result in empty checksums if in the same execution
 checkSumLog :: (LogM m)
             => LogName  -- ^ Identifier of the log
             -> m B.ByteString -- ^ A checksum, which can be written to in a later append.
