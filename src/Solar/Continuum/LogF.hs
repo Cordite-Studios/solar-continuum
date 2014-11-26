@@ -29,7 +29,7 @@ data LogF next
     | DeleteLog LogName next
     | RenameLog LogName LogName (ReplaceStatus -> next)
     | forall a. ReadFromLog LogName (TryRead a -> next)
-    | forall a. AppendLogData LogName a next
+    | forall a. Loggable a => AppendLogData LogName a next
 
 -- | We can't do existentials with derive functor, so here's what's needed for Free.
 instance Functor LogF where
