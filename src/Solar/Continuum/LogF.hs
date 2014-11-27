@@ -7,12 +7,6 @@ import qualified Data.ByteString as B
 import Data.Int
 import Solar.Continuum.Types
 
--- | Describes what happened when trying to rename a log.
-data ReplaceStatus
-  = RenameSuccess
-  | ReplaceSuccess
-  | LogNotFound
-  deriving (Show, Eq, Enum)
   
 -- | The continuation passing data structure for the Log Free Monad
 data LogF next
@@ -27,7 +21,7 @@ data LogF next
     | ResetLogPosition LogName next
     | SkipForwardLog LogName Int64 next
     | DeleteLog LogName next
-    | RenameLog LogName LogName (ReplaceStatus -> next)
+    | RenameLog LogName LogName next
     | forall a. ReadFromLog LogName (TryRead a -> next)
     | forall a. Loggable a => AppendLogData LogName a next
 
@@ -41,6 +35,6 @@ instance Functor LogF where
     fmap f (ResetLogPosition n a) = ResetLogPosition n $ f a
     fmap f (SkipForwardLog n p a) = SkipForwardLog n p $ f a
     fmap f (DeleteLog n a) = DeleteLog n $ f a
-    fmap f (RenameLog n1 n2 a) = RenameLog n1 n2 $ f . a
+    fmap f (RenameLog n1 n2 a) = RenameLog n1 n2 $ f a
     fmap f (ReadFromLog n a) = ReadFromLog n $ f . a
     fmap f (AppendLogData n d a) = AppendLogData n d $ f a

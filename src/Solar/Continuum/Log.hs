@@ -70,8 +70,8 @@ deleteLog n = liftF $ DeleteLog n ()
 renameLog   :: (LogM m)
             => LogName
             -> LogName
-            -> m ReplaceStatus
-renameLog n1 n2 = liftF $ RenameLog n1 n2 id
+            -> m ()
+renameLog n1 n2 = liftF $ RenameLog n1 n2 ()
 
 -- | Rea
 readFromLog :: (LogM m, Loggable a)
