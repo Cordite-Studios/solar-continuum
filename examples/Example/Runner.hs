@@ -82,8 +82,10 @@ runLogIO log = do
             Nothing -> next 0
             Just x -> next $ fromIntegral x
     run state (TellLogWritePosition name next) = readIORef (nextCalc state) >>= next.Unknown
-    run state (TellLogSize name next) = getFileSize (fName name) >>= next
-    run state (CheckSumLog name next) = BL.readFile (fName name) >>= next.MD5.hashlazy
+    run state (TellLogSize name next) = do
+        catch (getFileSize (fName name) >>= next) (\(e :: IOException) -> next 0)
+    run state (CheckSumLog name next) = do
+        catch (BL.readFile (fName name) >>= next.MD5.hashlazy) (\(e :: IOException) -> next $ MD5.hash "")
     run state (ResetLogPosition name next) = do
         modifyIORef' (readPosition state) $ M.adjust (\_ -> 0) name
         next
