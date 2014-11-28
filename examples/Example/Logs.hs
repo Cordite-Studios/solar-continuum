@@ -15,8 +15,8 @@ import Data.Serialize
 -- It is recommended to use sum-types instead of 
 data Blah = Blah Word8
 instance Serialize Blah where
-    put = return $ putWord8 0
-    get = Blah <$> getWord8
+    put (Blah v) = putWord8 $ v + 64
+    get = getWord8 >>= return.Blah.(\v -> v - 64)
 instance Loggable Blah where
     resolvePositions a _ = a
     unresolvedPositions _ = 0

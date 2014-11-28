@@ -55,7 +55,7 @@ mkState = do
     return $ State d a n p r rp wp uk
 
 fName :: B.ByteString -> String
-fName = show
+fName n = init $ drop 1 $ show n
 
 runLogIO :: Log a -> IO a
 runLogIO log = do
@@ -93,6 +93,9 @@ runLogIO log = do
         modifyIORef' (readPosition state) $ M.adjust (+ dist) name
         next
     run state (DeleteLog name next) = do
+        putStrLn ("Deleting log "
+                  ++ fName name
+                  )
         modifyIORef' (toAppend state) $ M.delete name
         pos <- readIORef $ positions state
         case M.lookup name pos of
@@ -105,6 +108,11 @@ runLogIO log = do
         next
     run state (RenameLog name1 name2 next) = do
         app <- readIORef $ toAppend state
+        putStrLn ("Renaming log "
+                  ++ fName name1
+                  ++ " to "
+                  ++ fName name2
+                  )
         -- Add renames
         modifyIORef' (toRename state) $ ST.insert (name1, name2)
         -- prevent deleting, if it did happen
@@ -115,12 +123,17 @@ runLogIO log = do
         run state (DeleteLog name1 next)
     run state (ReadFromLog name next) = do
         -- This is a really bad way, please don't do this.
-        bs <- BL.readFile $ fName name
+        bs <- catch (BL.readFile $ fName name) (\(e ::IOException) -> return BL.empty)
         pos <- readIORef $ readPosition state
         let dist = case M.lookup name pos of
                         Nothing -> 0
                         Just x -> x
         let toRead = BL.drop dist bs
+        putStrLn ("Attempting to read from "
+                  ++ fName name
+                  ++ " at "
+                  ++ show dist
+                  )
         case S.runGetLazyState S.get toRead of
             Left s -> next $ Left s
             Right (decoded, remaining) -> do
@@ -144,17 +157,25 @@ runLogIO log = do
                 -- operate on appending byte strings and such.
                 size <- getFileSize $ fName name
                 emp <- newIORef BL.empty
+                modifyIORef' (toAppend state) $ M.insert name (0, emp)
                 return (size, emp)
         
         when (unresolvedPositions dat > 0) $ do
             -- when there's things to resolve, put it in a queue for later.
             modifyIORef' (unknown state) $ M.insert ident $ (wposition, packLogger dat)
         -- Append the stuff
-        modifyIORef' written $ BL.append enc
+        modifyIORef' written $ \ws -> BL.append ws enc
         -- Say that we wrote 'here' in case something points to this.
         modifyIORef' (writePosition state) $ M.insert ident (name, wposition)
         -- Increment the number used to identify the next uncommitted entry
         modifyIORef' (nextCalc state) succ
+        putStrLn ("Attempting to append: "
+                  ++ fName name
+                  ++ " "
+                  ++ show ident
+                  ++ " "
+                  ++ show enc
+                  )
         next
     commit state = do
         -- Update references
@@ -172,6 +193,7 @@ runLogIO log = do
         -- Append
         app <- readIORef $ toAppend state
         DF.forM_ (M.toList app) $ \(name, (_, dat)) -> do
+            putStrLn $ "Appending to " ++ fName name
             readIORef dat >>= BL.appendFile (fName name)
         return ()
     getFileSize :: FilePath -> IO Int64
