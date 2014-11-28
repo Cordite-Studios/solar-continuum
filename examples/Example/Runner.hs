@@ -1,3 +1,4 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ExistentialQuantification #-}
@@ -13,7 +14,8 @@ import qualified Data.Map as M
 import qualified Data.Set as ST
 import qualified Data.Foldable as DF
 import System.Directory
-import Crypto.Hash.MD5
+import qualified Crypto.Hash.MD5 as MD5
+import Control.Exception
 
 import Control.Monad.Free
 
@@ -30,12 +32,13 @@ packLogger = MkLogging
 
 data State = State
     { toDelete :: IORef (ST.Set LogName)
-    , toAppend :: IORef (M.Map LogName B.ByteString)
+    , toAppend :: IORef (M.Map LogName (Int64, IORef (BL.ByteString)))
     , nextCalc :: IORef Int
     , positions :: IORef (M.Map LogName (ST.Set Int))
-    , renames :: IORef (M.Map LogName LogName)
-    , readPosition :: IORef (M.Map LogName Int)
-    , unknown :: IORef (M.Map Int (Int, Logging))
+    , toRename :: IORef (ST.Set (LogName, LogName))
+    , readPosition :: IORef (M.Map LogName Int64)
+    , writePosition :: IORef (M.Map Int (LogName, Int64))
+    , unknown :: IORef (M.Map Int (Int64, Logging))
     }
 
 mkState :: IO State
@@ -44,11 +47,12 @@ mkState = do
     a <- newIORef M.empty -- toAppend
     n <- newIORef 0 -- nextCalc
     p <- newIORef M.empty -- positions
-    r <- newIORef M.empty -- renames
+    r <- newIORef ST.empty -- renames
     rp <- newIORef M.empty -- readPosition
+    wp <- newIORef M.empty -- writePosition
     uk <- newIORef M.empty -- unknown
-    
-    return $ State d a n p r rp uk
+    -- Finally, give the state with all of those IORefs.
+    return $ State d a n p r rp wp uk
 
 fName :: B.ByteString -> String
 fName = show
@@ -77,18 +81,14 @@ runLogIO log = do
         case M.lookup name position of
             Nothing -> next 0
             Just x -> next $ fromIntegral x
-    run state (TellLogWritePosition name next) = do
-        u <- readIORef $ nextCalc state
-        next $ Unknown u
-    run state (TellLogSize name next) = withFile (fName name) ReadMode hFileSize >>= next.fromIntegral
-    run state (CheckSumLog name next) = do
-        fs <- BL.readFile $ fName name
-        next $ hashlazy fs
+    run state (TellLogWritePosition name next) = readIORef (nextCalc state) >>= next.Unknown
+    run state (TellLogSize name next) = getFileSize (fName name) >>= next
+    run state (CheckSumLog name next) = BL.readFile (fName name) >>= next.MD5.hashlazy
     run state (ResetLogPosition name next) = do
         modifyIORef' (readPosition state) $ M.adjust (\_ -> 0) name
         next
     run state (SkipForwardLog name dist next) = do
-        modifyIORef' (readPosition state) $ M.adjust (+ fromIntegral dist) name
+        modifyIORef' (readPosition state) $ M.adjust (+ dist) name
         next
     run state (DeleteLog name next) = do
         modifyIORef' (toAppend state) $ M.delete name
@@ -96,25 +96,81 @@ runLogIO log = do
         case M.lookup name pos of
             Nothing -> return ()
             Just x -> DF.forM_ x $ \i -> do
-                modifyIORef' (unknown state) $ M.delete undefined
+                modifyIORef' (unknown state) $ M.delete i
+                modifyIORef' (writePosition state) $ M.delete i
         modifyIORef' (positions state) $ M.delete name
         modifyIORef' (toDelete state) $ ST.insert name
         next
     run state (RenameLog name1 name2 next) = do
         app <- readIORef $ toAppend state
-        modifyIORef' (renames state) $ M.insert name1 name2
+        -- Add renames
+        modifyIORef' (toRename state) $ ST.insert (name1, name2)
+        -- prevent deleting, if it did happen
+        modifyIORef' (toDelete state) $ ST.delete name2
         case M.lookup name1 app of
             Nothing -> return ()
             Just x -> modifyIORef' (toAppend state) $ M.insert name2 x
         run state (DeleteLog name1 next)
-    run state (ReadFromLog _ next) = next $ Left "Worst runner ever."
+    run state (ReadFromLog name next) = do
+        -- This is a really bad way, please don't do this.
+        bs <- BL.readFile $ fName name
+        pos <- readIORef $ readPosition state
+        let dist = case M.lookup name pos of
+                        Nothing -> 0
+                        Just x -> x
+        let toRead = BL.drop dist bs
+        case S.runGetLazyState S.get toRead of
+            Left s -> next $ Left s
+            Right (decoded, remaining) -> do
+                let readSize = BL.length toRead - BL.length remaining
+                -- Update the read position
+                modifyIORef' (readPosition state) $ M.insertWith (+) name readSize
+                next decoded
     run state (AppendLogData name dat next) = do
         ident <- readIORef $ nextCalc state
+        let enc = S.encodeLazy dat
+        let len = BL.length enc
+        writes <- readIORef $ toAppend state
+        -- Find out the write position, and the written reference
+        (wposition, written) <- case M.lookup name writes of
+            Just (s,w) -> do
+                appending <- readIORef w
+                let appendlen = BL.length appending
+                return (s+appendlen,w)
+            Nothing -> do
+                -- Make sure that we have something there, since next we actually 
+                -- operate on appending byte strings and such.
+                size <- getFileSize $ fName name
+                emp <- newIORef BL.empty
+                return (size, emp)
+        
         when (unresolvedPositions dat > 0) $ do
-            modifyIORef' (unknown state) $ M.insert ident $ (0,packLogger dat)
-            return ()
-        -- TODO: plenty
+            -- when there's things to resolve, put it in a queue for later.
+            modifyIORef' (unknown state) $ M.insert ident $ (wposition, packLogger dat)
+        -- Append the stuff
+        modifyIORef' written $ BL.append enc
+        -- Say that we wrote 'here' in case something points to this.
+        modifyIORef' (writePosition state) $ M.insert ident (name, wposition)
+        -- Increment the number used to identify the next uncommitted entry
         modifyIORef' (nextCalc state) succ
         next
     commit state = do
+        -- Update references
+        -- TODO
+        -- Rename
+        mvs <- readIORef $ toRename state
+        DF.forM_ mvs $ \(n1, n2) -> do
+            catch
+                (renameFile (fName n1) (fName n2))
+                (\(e :: IOException) -> return ())
+        -- Delete
+        dels <- readIORef $ toDelete state
+        DF.forM_ dels $ \n -> do
+            catch (removeFile (fName n)) (\(e :: IOException) -> return ())
+        -- Append
+        app <- readIORef $ toAppend state
+        DF.forM_ (M.toList app) $ \(name, (_, dat)) -> do
+            readIORef dat >>= BL.appendFile (fName name)
         return ()
+    getFileSize :: FilePath -> IO Int64
+    getFileSize name = catch (BL.readFile name >>= return.BL.length) (\(e :: IOException) -> return 0) 

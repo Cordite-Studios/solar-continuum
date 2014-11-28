@@ -22,7 +22,7 @@ data LogF next
     | SkipForwardLog LogName Int64 next
     | DeleteLog LogName next
     | RenameLog LogName LogName next
-    | forall a. ReadFromLog LogName (TryRead a -> next)
+    | forall a. Loggable a => ReadFromLog LogName (TryRead a -> next)
     | forall a. Loggable a => AppendLogData LogName a next
 
 -- | We can't do existentials with derive functor, so here's what's needed for Free.
